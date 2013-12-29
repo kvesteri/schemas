@@ -1,19 +1,11 @@
 from collections import Mapping, Iterable
 from inspect import isclass
+from toolz.curried import *
 import pytest
 
 
 class SchemaError(Exception):
     pass
-
-
-
-def compose(*functions):
-    def inner(arg):
-        for f in reversed(functions):
-            arg = f(arg)
-        return arg
-    return inner
 
 
 class Required(object):
@@ -29,38 +21,47 @@ class default(object):
         self.value = value
 
 
-def validate_subschema(schema, data):
-    for subschema in schema:
-        try:
-            return validate_schema(subschema, data)
-        except SchemaError:
-            pass
-    raise SchemaError()
+def is_required(schema):
+    return (
+        required is schema or
+        isinstance(schema, Iterable) and required in schema
+    )
 
 
+@curry
+def validate_dict_schema(schema, data):
+    result_data = {}
+    for key_schema, value_schema in schema.items():
+        key_found = False
+        for key, value in data.items():
+            key, value = (
+                validate_schema(key_schema, key),
+                validate_schema(value_schema, value)
+            )
+            del data[key]
+            result_data[key] = value
+            key_found = True
+
+        if is_required(key_schema) and not key_found:
+            raise SchemaError()
+
+
+@curry
 def validate_schema(schema, data):
     if isinstance(schema, tuple):
-        if not all(map(lambda func: func(data), schema[1:])):
+        if not compose(*schema[1:])(data):
             raise SchemaError()
-        return composed_validator(validate_schema(schema[0], data))
+        return validate_schema(schema[0], data)
     elif isinstance(schema, dict):
         if not isinstance(data, dict):
             raise SchemaError()
 
-        return dict(
-            map(
-                lambda a: (
-                    validate_subschema(schema, a[0]),
-                    validate_subschema(schema.values(), a[1])
-                ),
-                data.items()
-            )
-        )
+        return validate_dict_schema(schema, data)
     elif isinstance(schema, list):
         if not isinstance(data, list):
             raise SchemaError()
 
-        return map(lambda a: validate_schema(schema[0], a), data)
+        return list(map(validate_schema(schema[0]), data))
     else:
         if isclass(schema):
             if not isinstance(data, schema):
@@ -85,7 +86,7 @@ def test_valid_schema_data(schema, data):
     (dict, 'str'),
     ({str: int}, {3: 3}),
     ({(str, required): 3}, {3: 3}),
-    ({str: (int, default(3))}, {}),
+    ({(str, required): (int, default(3))}, {}),
     ((list, len), []),
 ])
 def test_invalid_schema_data(schema, data):
